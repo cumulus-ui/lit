@@ -244,4 +244,17 @@ export interface Layout {
    *     }
    */
   reflowIfNeeded: (force?: boolean) => void;
+
+  /**
+   * Called by the Virtualizer when a large scroll jump is detected.
+   * The layout should stop processing updates until unfreeze() is called.
+   */
+  freeze: () => void;
+
+  /**
+   * Called by the Virtualizer when a large scroll jump has settled.
+   * The layout should clean up stale internal state and prepare for
+   * a fresh layout cycle from the current scroll position.
+   */
+  unfreeze: () => void;
 }
