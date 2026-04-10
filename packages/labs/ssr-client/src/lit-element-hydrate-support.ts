@@ -11,6 +11,10 @@
  */
 
 import type {PropertyValues} from '@lit/reactive-element';
+import {
+  adoptStyles,
+  type CSSResultOrNative,
+} from '@lit/reactive-element/css-tag.js';
 import {render, RenderOptions} from 'lit-html';
 import {hydrate} from './lib/hydrate-lit-html.js';
 
@@ -27,6 +31,57 @@ interface PatchableLitElement extends HTMLElement {
   renderOptions: RenderOptions;
   _$needsHydration: boolean;
 }
+
+interface PatchableLitElementConstructor {
+  elementProperties?: Map<string, {reflect?: boolean}>;
+  elementStyles?: Array<CSSResultOrNative>;
+}
+
+/**
+ * Check whether hydrate() can safely adopt the SSR output. It can't when:
+ * - The shadow root contains children with `defer-hydration`, whose SSR'd
+ *   DOM structure won't match the client's template walker expectations
+ * - Any non-reflected property has a non-default value (e.g. set by an
+ *   inline script before element upgrade), meaning the SSR output was
+ *   rendered with defaults that no longer match the client render
+ */
+const canHydrate = (element: PatchableLitElement): boolean => {
+  if (element.shadowRoot?.querySelector('[defer-hydration]')) {
+    return false;
+  }
+  const ctor = element.constructor as PatchableLitElementConstructor;
+  if (ctor.elementProperties) {
+    for (const [name, options] of ctor.elementProperties) {
+      if (options.reflect) continue;
+      const v = Reflect.get(element, name);
+      if (v == null || v === '' || v === false) continue;
+      if (Array.isArray(v)) {
+        if (v.length > 0) return false;
+        continue;
+      }
+      if (typeof v === 'object' || typeof v === 'function') return false;
+    }
+  }
+  return true;
+};
+
+/**
+ * Replace the SSR'd shadow root content with a fresh client-side render.
+ * Used when hydrate() would fail due to a mismatch between server and
+ * client output.
+ */
+const replaceSSRContent = (
+  element: PatchableLitElement,
+  templateResult: unknown
+) => {
+  const root = element.renderRoot as ShadowRoot;
+  root.replaceChildren();
+  adoptStyles(
+    root,
+    (element.constructor as PatchableLitElementConstructor).elementStyles!
+  );
+  render(templateResult, root, element.renderOptions);
+};
 
 globalThis.litElementHydrateSupport = ({
   LitElement,
@@ -85,7 +140,8 @@ globalThis.litElementHydrateSupport = ({
     }
   };
 
-  // Hydrate on first update when needed
+  // Hydrate on first update when needed, falling back to a clean replace
+  // when the SSR output can't be adopted by hydrate()
   const update = Object.getPrototypeOf(LitElement.prototype).update;
   LitElement.prototype.update = function (
     this: PatchableLitElement,
@@ -105,7 +161,11 @@ globalThis.litElementHydrateSupport = ({
           this.removeAttribute(attrName);
         }
       }
-      hydrate(value, this.renderRoot, this.renderOptions);
+      if (canHydrate(this)) {
+        hydrate(value, this.renderRoot, this.renderOptions);
+      } else {
+        replaceSSRContent(this, value);
+      }
     } else {
       render(value, this.renderRoot, this.renderOptions);
     }
